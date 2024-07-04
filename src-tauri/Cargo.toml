@@ -1,0 +1,26 @@
+[package]
+name = "discord-vc-status"
+version = "0.0.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "1", features = [] }
+
+[dependencies]
+tauri = { version = "1", features = [ "dialog-message", "shell-open"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+discord-rich-presence = "0.2.4"
+uuid = { version = "1.9.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
+reqwest = { version = "0.12", features = ["json"] }
+confy = "0.6.1"
+dotenvy = "0.15.7"
+dotenvy_macro = "0.15.7"
+
+[features]
+# This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum IpcErrorType {
     CreateClient,
     Connect,
     Authorize,
     Subscribe,
     EventReceive,
+    EventSend,
     EventEncode,
 }
 
@@ -18,6 +19,13 @@ pub struct InternalIpcError {
     pub error_type: IpcErrorType,
     pub message: String,
     pub internal: String,
+    pub payload: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct IpcError {
+    pub error_type: IpcErrorType,
+    pub message: String,
     pub payload: Option<Value>,
 }
 

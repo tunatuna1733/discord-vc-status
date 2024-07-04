@@ -6,10 +6,11 @@ mod config;
 mod ipc;
 mod log;
 
-use auth::try_reauth;
+use auth::{try_reauth, AuthError, AuthErrorType};
 use config::Config;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use dotenvy_macro::{self, dotenv};
+use ipc::IpcError;
 use log::log_error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,13 +28,6 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-#[derive(Serialize, Deserialize)]
-struct IpcError {
-    error_type: IpcErrorType,
-    message: String,
-    pub payload: Option<Value>,
-}
-
 #[derive(Display)]
 enum EventName {
     #[strum(to_string = "error")]
@@ -48,12 +42,12 @@ enum EventName {
     VCMuteUpdate,
 }
 
-fn emit_event(window: &Window, event_name: EventName, payload: Value) -> () {
+fn emit_event<S: Serialize + Clone>(window: &Window, event_name: EventName, payload: S) -> () {
     let event = event_name.to_string();
-    if let Err(err) = &window.emit(&event, payload.clone()) {
+    if let Err(err) = &window.emit(&event, payload) {
         log_error(
             "Emit Event Error".to_string(),
-            format!("Error while emitting {event_name} event\n{payload}\n{err}"),
+            format!("Error while emitting {event_name} event.\n{err}"),
         );
     }
 }
@@ -98,17 +92,9 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
         Ok(t) => t,
         Err(err) => {
             // if the reauth failed, it tries to do the normal auth
-            emit_event(
-                &window,
-                EventName::Error,
-                json!({"event_name": err.error_type, "detail": err.message}),
-            );
+            emit_event(&window, EventName::Error, err);
             if let Err(err) = send_auth(&mut client) {
-                emit_event(
-                    &window,
-                    EventName::Error,
-                    json!({"event_name": err.error_type, "detail": err.message}),
-                );
+                emit_event(&window, EventName::Error, err);
             }
             "".to_string()
         }
@@ -120,7 +106,10 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
         emit_event(
             &window,
             EventName::Error,
-            json!({"event_name": "SAVE", "detail": format!("Failed to save refresh token.\n{}", err.to_string())}),
+            AuthError {
+                error_type: AuthErrorType::ConfigSave,
+                message: err.to_string(),
+            },
         );
     }
 
@@ -149,11 +138,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                     let tokens = match fetch_discord_token(code).await {
                         Ok(t) => t,
                         Err(err) => {
-                            emit_event(
-                                &window,
-                                EventName::CriticalError,
-                                json!({"event_name": err.error_type, "detail": err.message}),
-                            );
+                            emit_event(&window, EventName::CriticalError, err);
                             continue;
                         }
                     };
@@ -164,16 +149,15 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         emit_event(
                             &window,
                             EventName::Error,
-                            json!({"event_name": "SAVE", "detail": format!("Failed to save refresh token.\n{}", err.to_string())}),
+                            AuthError {
+                                error_type: AuthErrorType::ConfigSave,
+                                message: err.to_string(),
+                            },
                         );
                     }
                     // send token to ipc
                     if let Err(err) = send_token(&mut client, tokens.access_token) {
-                        emit_event(
-                            &window,
-                            EventName::CriticalError,
-                            json!({"event_name": err.error_type, "detail": err.message}),
-                        );
+                        emit_event(&window, EventName::CriticalError, err);
                     }
                 } else if payload["cmd"] == "AUTHENTICATE" {
                     // subscribe events after authentication was done
@@ -181,14 +165,22 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         emit_event(
                             &window,
                             EventName::CriticalError,
-                            json!({"event_name": "VOICE_SETTINGS_UPDATE", "detail": err}),
+                            IpcError {
+                                error_type: err.error_type,
+                                message: err.message,
+                                payload: err.payload,
+                            },
                         );
                     }
                     if let Err(err) = subscribe(&mut client, "VOICE_CHANNEL_SELECT", json!({})) {
                         emit_event(
                             &window,
                             EventName::CriticalError,
-                            json!({"event_name": "VOICE_CHANNEL_SELECT", "detail": err}),
+                            IpcError {
+                                error_type: err.error_type,
+                                message: err.message,
+                                payload: err.payload,
+                            },
                         );
                     }
                     // get the current voice channel
@@ -200,7 +192,12 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         emit_event(
                             &window,
                             EventName::CriticalError,
-                            json!({"event_name": "GET_SELECTED_VOICE_CHANNEL", "detail": "Could not get initial state."}),
+                            IpcError {
+                                error_type: IpcErrorType::EventSend,
+                                message: "Failed to send GET_SELECTED_VOICE_CHANNEL request."
+                                    .to_string(),
+                                payload: None,
+                            },
                         );
                         continue;
                     }
@@ -238,7 +235,11 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         emit_event(
                             &window,
                             EventName::CriticalError,
-                            json!({"event_name": "AUTHORIZE", "detail": "User cancelled the authorization."}),
+                            IpcError {
+                                error_type: IpcErrorType::Authorize,
+                                message: "User cancelled the app authorization.".to_string(),
+                                payload: None,
+                            },
                         );
                         continue;
                     }
@@ -247,7 +248,11 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         emit_event(
                             &window,
                             EventName::Error,
-                            json!({"event_name": "SUBSCRIBE", "detail": "Could not subscribe event."}),
+                            IpcError {
+                                error_type: IpcErrorType::Subscribe,
+                                message: "Failed to subscribe to event.".to_string(),
+                                payload: None, // TODO
+                            },
                         );
                         continue;
                     }
@@ -280,10 +285,11 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                                     emit_event(
                                         &window,
                                         EventName::Error,
-                                        json!({
-                                            "event_name": "error",
-                                            "detail": err
-                                        }),
+                                        IpcError {
+                                            error_type: err.error_type,
+                                            message: err.message,
+                                            payload: err.payload,
+                                        },
                                     );
                                 }
                             }
@@ -306,7 +312,13 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                                 emit_event(
                                     &window,
                                     EventName::Error,
-                                    json!({"event_name": "GET_SELECTED_VOICE_CHANNEL", "detail": "Could not get vc state."}),
+                                    IpcError {
+                                        error_type: IpcErrorType::EventSend,
+                                        message:
+                                            "Failed to send GET_SELECTED_VOICE_CHANNEL request."
+                                                .to_string(),
+                                        payload: None,
+                                    },
                                 );
                                 continue;
                             }
@@ -318,10 +330,11 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                                 emit_event(
                                     &window,
                                     EventName::Error,
-                                    json!({
-                                        "event_name": "error",
-                                        "detail": err
-                                    }),
+                                    IpcError {
+                                        error_type: err.error_type,
+                                        message: err.message,
+                                        payload: err.payload,
+                                    },
                                 );
                             }
                         }

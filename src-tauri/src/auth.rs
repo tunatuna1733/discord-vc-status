@@ -6,16 +6,17 @@ use uuid::Uuid;
 
 use crate::{config::get_config, log::log_error};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum AuthErrorType {
     TokenFetch,
     RefreshToken,
     ConfigRead,
+    ConfigSave,
     Decode,
     IpcSend,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AuthError {
     pub error_type: AuthErrorType,
     pub message: String,

@@ -18,6 +18,7 @@ pub struct InternalIpcError {
     pub error_type: IpcErrorType,
     pub message: String,
     pub internal: String,
+    pub payload: Option<Value>,
 }
 
 pub fn subscribe(
@@ -31,11 +32,12 @@ pub fn subscribe(
         "evt": event_name,
         "args": args
     });
-    if let Err(err) = client.send(payload, 1) {
+    if let Err(err) = client.send(payload.clone(), 1) {
         return Err(InternalIpcError {
             error_type: IpcErrorType::Subscribe,
             message: format!("Failed to subscribe event: {}", event_name),
             internal: err.to_string(),
+            payload: Some(payload),
         });
     }
     Ok(())
@@ -52,11 +54,12 @@ pub fn unsubscribe(
         "evt": event_name,
         "args": args
     });
-    if let Err(err) = client.send(payload, 1) {
+    if let Err(err) = client.send(payload.clone(), 1) {
         return Err(InternalIpcError {
             error_type: IpcErrorType::Subscribe,
             message: format!("Failed to unsubscribe event: {}", event_name),
             internal: err.to_string(),
+            payload: Some(payload),
         });
     }
     Ok(())

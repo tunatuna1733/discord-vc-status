@@ -13,6 +13,7 @@ use dotenvy_macro::{self, dotenv};
 use log::log_error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use strum_macros::Display;
 use tauri::Window;
 use uuid::Uuid;
 
@@ -30,10 +31,26 @@ fn greet(name: &str) -> String {
 struct IpcError {
     error_type: IpcErrorType,
     message: String,
+    pub payload: Option<Value>,
 }
 
-fn emit_event(window: &Window, event_name: &str, payload: Value) -> () {
-    if let Err(err) = &window.emit(event_name, payload.clone()) {
+#[derive(Display)]
+enum EventName {
+    #[strum(to_string = "error")]
+    Error,
+    #[strum(to_string = "critical_error")]
+    CriticalError,
+    #[strum(to_string = "vc_select")]
+    VCSelect,
+    #[strum(to_string = "vc_info")]
+    VCInfo,
+    #[strum(to_string = "vc_mute_update")]
+    VCMuteUpdate,
+}
+
+fn emit_event(window: &Window, event_name: EventName, payload: Value) -> () {
+    let event = event_name.to_string();
+    if let Err(err) = &window.emit(&event, payload.clone()) {
         log_error(
             "Emit Event Error".to_string(),
             format!("Error while emitting {event_name} event\n{payload}\n{err}"),
@@ -62,6 +79,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
             return Err(IpcError {
                 error_type: IpcErrorType::CreateClient,
                 message: err.to_string(),
+                payload: None,
             });
         }
     };
@@ -71,6 +89,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
         return Err(IpcError {
             error_type: IpcErrorType::Connect,
             message: err.to_string(),
+            payload: None,
         });
     }
 
@@ -81,13 +100,13 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
             // if the reauth failed, it tries to do the normal auth
             emit_event(
                 &window,
-                "error",
+                EventName::Error,
                 json!({"event_name": err.error_type, "detail": err.message}),
             );
             if let Err(err) = send_auth(&mut client) {
                 emit_event(
                     &window,
-                    "error",
+                    EventName::Error,
                     json!({"event_name": err.error_type, "detail": err.message}),
                 );
             }
@@ -100,7 +119,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
     }) {
         emit_event(
             &window,
-            "error",
+            EventName::Error,
             json!({"event_name": "SAVE", "detail": format!("Failed to save refresh token.\n{}", err.to_string())}),
         );
     }
@@ -132,7 +151,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         Err(err) => {
                             emit_event(
                                 &window,
-                                "critical_error",
+                                EventName::CriticalError,
                                 json!({"event_name": err.error_type, "detail": err.message}),
                             );
                             continue;
@@ -144,7 +163,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                     }) {
                         emit_event(
                             &window,
-                            "error",
+                            EventName::Error,
                             json!({"event_name": "SAVE", "detail": format!("Failed to save refresh token.\n{}", err.to_string())}),
                         );
                     }
@@ -152,7 +171,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                     if let Err(err) = send_token(&mut client, tokens.access_token) {
                         emit_event(
                             &window,
-                            "critical_error",
+                            EventName::CriticalError,
                             json!({"event_name": err.error_type, "detail": err.message}),
                         );
                     }
@@ -161,14 +180,14 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                     if let Err(err) = subscribe(&mut client, "VOICE_SETTINGS_UPDATE", json!({})) {
                         emit_event(
                             &window,
-                            "critical_error",
+                            EventName::CriticalError,
                             json!({"event_name": "VOICE_SETTINGS_UPDATE", "detail": err}),
                         );
                     }
                     if let Err(err) = subscribe(&mut client, "VOICE_CHANNEL_SELECT", json!({})) {
                         emit_event(
                             &window,
-                            "critical_error",
+                            EventName::CriticalError,
                             json!({"event_name": "VOICE_CHANNEL_SELECT", "detail": err}),
                         );
                     }
@@ -180,7 +199,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                     if let Err(_) = client.send(current_state_payload, 1) {
                         emit_event(
                             &window,
-                            "critical_error",
+                            EventName::CriticalError,
                             json!({"event_name": "GET_SELECTED_VOICE_CHANNEL", "detail": "Could not get initial state."}),
                         );
                         continue;
@@ -191,7 +210,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         current_state.channel_id = Value::Null;
                         emit_event(
                             &window,
-                            "vc_select",
+                            EventName::VCSelect,
                             json!({
                                 "in_vc": false
                             }),
@@ -201,7 +220,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         current_state.channel_id = payload["data"]["id"].clone();
                         emit_event(
                             &window,
-                            "vc_info",
+                            EventName::VCInfo,
                             json!({
                                 "name": payload["data"]["name"],
                                 "users": payload["data"]["voice_states"]
@@ -218,7 +237,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         // authorization error (user pressed cancel button)
                         emit_event(
                             &window,
-                            "critical_error",
+                            EventName::CriticalError,
                             json!({"event_name": "AUTHORIZE", "detail": "User cancelled the authorization."}),
                         );
                         continue;
@@ -227,7 +246,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         // client failed to subscribe events
                         emit_event(
                             &window,
-                            "error",
+                            EventName::Error,
                             json!({"event_name": "SUBSCRIBE", "detail": "Could not subscribe event."}),
                         );
                         continue;
@@ -237,7 +256,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         // vc settings update event
                         emit_event(
                             &window,
-                            "vc_update",
+                            EventName::VCMuteUpdate,
                             json!({
                                 "mute": payload["data"]["mute"],
                                 "deaf": payload["data"]["deaf"],
@@ -252,7 +271,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             let vc_select_payload = json!({
                                 "in_vc": false
                             });
-                            emit_event(&window, "vc_select", vc_select_payload);
+                            emit_event(&window, EventName::VCSelect, vc_select_payload);
                             if current_state.channel_id.is_null() {
                                 // unsubscribe events
                                 if let Err(err) =
@@ -260,7 +279,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                                 {
                                     emit_event(
                                         &window,
-                                        "error",
+                                        EventName::Error,
                                         json!({
                                             "event_name": "error",
                                             "detail": err
@@ -274,7 +293,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             let vc_select_payload = json!({
                                 "in_vc": true,
                             });
-                            emit_event(&window, "vc_select", vc_select_payload);
+                            emit_event(&window, EventName::VCSelect, vc_select_payload);
 
                             // send current vc status command
                             if let Err(_) = client.send(
@@ -286,7 +305,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             ) {
                                 emit_event(
                                     &window,
-                                    "error",
+                                    EventName::Error,
                                     json!({"event_name": "GET_SELECTED_VOICE_CHANNEL", "detail": "Could not get vc state."}),
                                 );
                                 continue;
@@ -298,7 +317,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             {
                                 emit_event(
                                     &window,
-                                    "error",
+                                    EventName::Error,
                                     json!({
                                         "event_name": "error",
                                         "detail": err
@@ -325,7 +344,8 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-// memo
-// completed prototype of auth and backend things
-// need to implement some event emitting
+// TODO
+// need to implement voice state events
+// refactor event processing for readability
 // there is a rare case which fails receiving socket data every time :(
+// makes the error which is emit to have `IpcError` structure

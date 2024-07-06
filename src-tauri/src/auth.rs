@@ -2,6 +2,7 @@ use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use dotenvy_macro::dotenv;
 use reqwest::header::{self, HeaderMap};
 use serde::{Deserialize, Serialize};
+use tauri::async_runtime::Mutex;
 use uuid::Uuid;
 
 use crate::{config::get_config, log::log_error};
@@ -37,7 +38,7 @@ pub struct TokenData {
     pub refresh_token: String,
 }
 
-pub fn send_auth(client: &mut DiscordIpcClient) -> Result<(), AuthError> {
+pub async fn send_auth(client: &Mutex<DiscordIpcClient>) -> Result<(), AuthError> {
     let client_id = dotenv!("CLIENT_ID");
     let payload = serde_json::json!({
         "nonce": Uuid::new_v4().to_string(),
@@ -47,7 +48,7 @@ pub fn send_auth(client: &mut DiscordIpcClient) -> Result<(), AuthError> {
             "scopes": ["rpc", "identify"]
         }
     });
-    if let Err(err) = client.send(payload, 1) {
+    if let Err(err) = client.lock().await.send(payload, 1) {
         return Err(AuthError {
             error_type: AuthErrorType::IpcSend,
             message: format!("Failed to send authorization request.\n{}", err.to_string()),
@@ -154,7 +155,7 @@ pub async fn refresh_discord_token(refresh_token: String) -> Result<TokenData, A
     })
 }
 
-pub async fn try_reauth(client: &mut DiscordIpcClient) -> Result<String, AuthError> {
+pub async fn try_reauth(client: &Mutex<DiscordIpcClient>) -> Result<String, AuthError> {
     let config = match get_config() {
         Ok(c) => c,
         Err(err) => {
@@ -184,14 +185,17 @@ pub async fn try_reauth(client: &mut DiscordIpcClient) -> Result<String, AuthErr
         }
     };
 
-    if let Err(err) = send_token(client, tokens.access_token) {
+    if let Err(err) = send_token(client, tokens.access_token).await {
         return Err(err);
     }
 
     Ok(tokens.refresh_token)
 }
 
-pub fn send_token(client: &mut DiscordIpcClient, access_token: String) -> Result<(), AuthError> {
+pub async fn send_token(
+    client: &Mutex<DiscordIpcClient>,
+    access_token: String,
+) -> Result<(), AuthError> {
     let auth_payload = serde_json::json!({
         "nonce": Uuid::new_v4().to_string(),
         "cmd": "AUTHENTICATE",
@@ -199,7 +203,7 @@ pub fn send_token(client: &mut DiscordIpcClient, access_token: String) -> Result
             "access_token": access_token
         }
     });
-    if let Err(err) = client.send(auth_payload, 1) {
+    if let Err(err) = client.lock().await.send(auth_payload, 1) {
         return Err(AuthError {
             error_type: AuthErrorType::IpcSend,
             message: format!("Failed to send access token to ipc.\n{}", err.to_string()),

@@ -1,6 +1,7 @@
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::async_runtime::Mutex;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -29,8 +30,8 @@ pub struct IpcError {
     pub payload: Option<Value>,
 }
 
-pub fn subscribe(
-    client: &mut DiscordIpcClient,
+pub async fn subscribe(
+    client: &Mutex<DiscordIpcClient>,
     event_name: &str,
     args: Value,
 ) -> Result<(), InternalIpcError> {
@@ -40,7 +41,7 @@ pub fn subscribe(
         "evt": event_name,
         "args": args
     });
-    if let Err(err) = client.send(payload.clone(), 1) {
+    if let Err(err) = client.lock().await.send(payload.clone(), 1) {
         return Err(InternalIpcError {
             error_type: IpcErrorType::Subscribe,
             message: format!("Failed to subscribe event: {}", event_name),
@@ -51,8 +52,8 @@ pub fn subscribe(
     Ok(())
 }
 
-pub fn unsubscribe(
-    client: &mut DiscordIpcClient,
+pub async fn unsubscribe(
+    client: &Mutex<DiscordIpcClient>,
     event_name: &str,
     args: Value,
 ) -> Result<(), InternalIpcError> {
@@ -62,7 +63,7 @@ pub fn unsubscribe(
         "evt": event_name,
         "args": args
     });
-    if let Err(err) = client.send(payload.clone(), 1) {
+    if let Err(err) = client.lock().await.send(payload.clone(), 1) {
         return Err(InternalIpcError {
             error_type: IpcErrorType::Subscribe,
             message: format!("Failed to unsubscribe event: {}", event_name),
@@ -73,8 +74,8 @@ pub fn unsubscribe(
     Ok(())
 }
 
-pub fn set_vc_events(
-    client: &mut DiscordIpcClient,
+pub async fn set_vc_events(
+    client: &Mutex<DiscordIpcClient>,
     channel_id: Value,
     is_subscribe: bool,
 ) -> Result<(), InternalIpcError> {
@@ -83,28 +84,38 @@ pub fn set_vc_events(
             client,
             "VOICE_STATE_CREATE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
         if let Err(err) = subscribe(
             client,
             "VOICE_STATE_UPDATE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
         if let Err(err) = subscribe(
             client,
             "VOICE_STATE_DELETE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
 
-        if let Err(err) = subscribe(client, "SPEAKING_START", json!({"channel_id": channel_id})) {
+        if let Err(err) =
+            subscribe(client, "SPEAKING_START", json!({"channel_id": channel_id})).await
+        {
             return Err(err);
         }
-        if let Err(err) = subscribe(client, "SPEAKING_STOP", json!({"channel_id": channel_id})) {
+        if let Err(err) =
+            subscribe(client, "SPEAKING_STOP", json!({"channel_id": channel_id})).await
+        {
             return Err(err);
         }
     } else {
@@ -112,28 +123,38 @@ pub fn set_vc_events(
             client,
             "VOICE_STATE_CREATE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
         if let Err(err) = unsubscribe(
             client,
             "VOICE_STATE_UPDATE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
         if let Err(err) = unsubscribe(
             client,
             "VOICE_STATE_DELETE",
             json!({"channel_id": channel_id}),
-        ) {
+        )
+        .await
+        {
             return Err(err);
         }
 
-        if let Err(err) = unsubscribe(client, "SPEAKING_START", json!({"channel_id": channel_id})) {
+        if let Err(err) =
+            unsubscribe(client, "SPEAKING_START", json!({"channel_id": channel_id})).await
+        {
             return Err(err);
         }
-        if let Err(err) = unsubscribe(client, "SPEAKING_STOP", json!({"channel_id": channel_id})) {
+        if let Err(err) =
+            unsubscribe(client, "SPEAKING_STOP", json!({"channel_id": channel_id})).await
+        {
             return Err(err);
         }
     }

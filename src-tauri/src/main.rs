@@ -2,11 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod client;
 mod config;
 mod ipc;
 mod log;
 
 use auth::{try_reauth, AuthError, AuthErrorType};
+use client::IPCClientManager;
 use config::Config;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use dotenvy_macro::{self, dotenv};
@@ -15,18 +17,12 @@ use log::log_error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use strum_macros::Display;
-use tauri::Window;
+use tauri::{Manager, State, Window};
 use uuid::Uuid;
 
 use crate::auth::{fetch_discord_token, send_auth, send_token};
 use crate::config::set_config;
 use crate::ipc::{set_vc_events, subscribe, IpcErrorType};
-
-// Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[derive(Display)]
 enum EventName {
@@ -40,6 +36,10 @@ enum EventName {
     VCInfo,
     #[strum(to_string = "vc_mute_update")]
     VCMuteUpdate,
+    #[strum(to_string = "vc_user")]
+    VCUser,
+    #[strum(to_string = "vc_speak")]
+    VCSpeak,
 }
 
 fn emit_event<S: Serialize + Clone>(window: &Window, event_name: EventName, payload: S) -> () {
@@ -54,6 +54,7 @@ fn emit_event<S: Serialize + Clone>(window: &Window, event_name: EventName, payl
 
 struct CurrentState {
     channel_id: Value,
+    user_id: Value,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -64,22 +65,13 @@ struct TokenResponse {
 }
 
 #[tauri::command]
-async fn connect_ipc(window: Window) -> Result<(), IpcError> {
-    // create ipc client
-    let client_id = dotenv!("CLIENT_ID");
-    let mut client = match DiscordIpcClient::new(client_id) {
-        Ok(c) => c,
-        Err(err) => {
-            return Err(IpcError {
-                error_type: IpcErrorType::CreateClient,
-                message: err.to_string(),
-                payload: None,
-            });
-        }
-    };
-
+async fn connect_ipc(
+    window: Window,
+    cm: State<'_, IPCClientManager>,
+    handle: tauri::AppHandle,
+) -> Result<(), IpcError> {
     // connect to ipc
-    if let Err(err) = client.connect() {
+    if let Err(err) = cm.client.lock().await.connect() {
         return Err(IpcError {
             error_type: IpcErrorType::Connect,
             message: err.to_string(),
@@ -88,12 +80,12 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
     }
 
     // reauth --------------------------------
-    let refresh_token = match try_reauth(&mut client).await {
+    let refresh_token = match try_reauth(&cm.client).await {
         Ok(t) => t,
         Err(err) => {
             // if the reauth failed, it tries to do the normal auth
             emit_event(&window, EventName::Error, err);
-            if let Err(err) = send_auth(&mut client) {
+            if let Err(err) = send_auth(&cm.client).await {
                 emit_event(&window, EventName::Error, err);
             }
             "".to_string()
@@ -115,11 +107,13 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
 
     // subscribe and emit events
     tauri::async_runtime::spawn(async move {
+        let client_manager = handle.state::<IPCClientManager>();
         let mut current_state = CurrentState {
             channel_id: Value::Null,
+            user_id: Value::Null,
         };
         loop {
-            let (_opcode, payload) = match client.recv() {
+            let (_opcode, payload) = match client_manager.client.lock().await.recv() {
                 Ok(res) => res,
                 Err(err) => {
                     println!("Event Receive Error\n{}", err);
@@ -156,12 +150,16 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         );
                     }
                     // send token to ipc
-                    if let Err(err) = send_token(&mut client, tokens.access_token) {
+                    if let Err(err) = send_token(&client_manager.client, tokens.access_token).await
+                    {
                         emit_event(&window, EventName::CriticalError, err);
                     }
                 } else if payload["cmd"] == "AUTHENTICATE" {
+                    current_state.user_id = payload["data"]["user"]["id"].clone();
                     // subscribe events after authentication was done
-                    if let Err(err) = subscribe(&mut client, "VOICE_SETTINGS_UPDATE", json!({})) {
+                    if let Err(err) =
+                        subscribe(&client_manager.client, "VOICE_SETTINGS_UPDATE", json!({})).await
+                    {
                         emit_event(
                             &window,
                             EventName::CriticalError,
@@ -172,7 +170,9 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             },
                         );
                     }
-                    if let Err(err) = subscribe(&mut client, "VOICE_CHANNEL_SELECT", json!({})) {
+                    if let Err(err) =
+                        subscribe(&client_manager.client, "VOICE_CHANNEL_SELECT", json!({})).await
+                    {
                         emit_event(
                             &window,
                             EventName::CriticalError,
@@ -188,7 +188,12 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         "nonce": Uuid::new_v4().to_string(),
                         "cmd": "GET_SELECTED_VOICE_CHANNEL"
                     });
-                    if let Err(_) = client.send(current_state_payload, 1) {
+                    if let Err(_) = client_manager
+                        .client
+                        .lock()
+                        .await
+                        .send(current_state_payload, 1)
+                    {
                         emit_event(
                             &window,
                             EventName::CriticalError,
@@ -217,12 +222,34 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                         current_state.channel_id = payload["data"]["id"].clone();
                         emit_event(
                             &window,
+                            EventName::VCSelect,
+                            json!({
+                                "in_vc": true
+                            }),
+                        );
+                        emit_event(
+                            &window,
                             EventName::VCInfo,
                             json!({
                                 "name": payload["data"]["name"],
                                 "users": payload["data"]["voice_states"]
                             }),
                         );
+
+                        if let Err(err) =
+                            set_vc_events(&client_manager.client, current_state.channel_id, true)
+                                .await
+                        {
+                            emit_event(
+                                &window,
+                                EventName::Error,
+                                IpcError {
+                                    error_type: err.error_type,
+                                    message: err.message,
+                                    payload: err.payload,
+                                },
+                            );
+                        }
                     }
                 } else {
                     println!("IPC Event: {}", payload);
@@ -279,8 +306,12 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             emit_event(&window, EventName::VCSelect, vc_select_payload);
                             if current_state.channel_id.is_null() {
                                 // unsubscribe events
-                                if let Err(err) =
-                                    set_vc_events(&mut client, current_state.channel_id, false)
+                                if let Err(err) = set_vc_events(
+                                    &client_manager.client,
+                                    current_state.channel_id,
+                                    false,
+                                )
+                                .await
                                 {
                                     emit_event(
                                         &window,
@@ -302,7 +333,7 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             emit_event(&window, EventName::VCSelect, vc_select_payload);
 
                             // send current vc status command
-                            if let Err(_) = client.send(
+                            if let Err(_) = client_manager.client.lock().await.send(
                                 json!({
                                     "nonce": Uuid::new_v4().to_string(),
                                     "cmd": "GET_SELECTED_VOICE_CHANNEL"
@@ -324,8 +355,12 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             }
 
                             // subscribe events for current channel
-                            if let Err(err) =
-                                set_vc_events(&mut client, current_state.channel_id, true)
+                            if let Err(err) = set_vc_events(
+                                &client_manager.client,
+                                current_state.channel_id,
+                                true,
+                            )
+                            .await
                             {
                                 emit_event(
                                     &window,
@@ -339,8 +374,110 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
                             }
                         }
                     } else if payload["evt"] == "VOICE_STATE_CREATE" {
+                        // someone joined vc
+                        if payload["data"]["user"]["id"].to_string()
+                            != current_state.user_id.to_string()
+                        {
+                            emit_event(
+                                &window,
+                                EventName::VCUser,
+                                json!({
+                                    "event": "JOIN",
+                                    "data": {
+                                        "id": payload["data"]["user"]["id"],
+                                        "username": payload["data"]["user"]["username"],
+                                        "avatar": payload["data"]["user"]["avatar"],
+                                        "nick": payload["data"]["nick"],
+                                        "mute": payload["data"]["voice_state"]["mute"],
+                                        "self_mute": payload["data"]["voice_state"]["self_mute"],
+                                        "deaf": payload["data"]["voice_state"]["deaf"],
+                                        "self_deaf": payload["data"]["voice_state"]["self_deaf"],
+                                    }
+                                }),
+                            );
+                        }
                     } else if payload["evt"] == "VOICE_STATE_UPDATE" {
+                        if payload["data"]["user"]["id"].to_string()
+                            != current_state.user_id.to_string()
+                        {
+                            emit_event(
+                                &window,
+                                EventName::VCUser,
+                                json!({
+                                    "event": "UPDATE",
+                                    "data": {
+                                        "id": payload["data"]["user"]["id"],
+                                        "username": payload["data"]["user"]["username"],
+                                        "avatar": payload["data"]["user"]["avatar"],
+                                        "nick": payload["data"]["nick"],
+                                        "mute": payload["data"]["voice_state"]["mute"],
+                                        "self_mute": payload["data"]["voice_state"]["self_mute"],
+                                        "deaf": payload["data"]["voice_state"]["deaf"],
+                                        "self_deaf": payload["data"]["voice_state"]["self_deaf"],
+                                    }
+                                }),
+                            );
+                        }
                     } else if payload["evt"] == "VOICE_STATE_DELETE" {
+                        if payload["data"]["user"]["id"].to_string()
+                            != current_state.user_id.to_string()
+                        {
+                            emit_event(
+                                &window,
+                                EventName::VCUser,
+                                json!({
+                                    "event": "LEAVE",
+                                }),
+                            );
+                        }
+                    } else if payload["evt"] == "SPEAKING_START" {
+                        if payload["data"]["user_id"].to_string()
+                            == current_state.user_id.to_string()
+                        {
+                            emit_event(
+                                &window,
+                                EventName::VCSpeak,
+                                json!({
+                                    "user_id": payload["data"]["user_id"],
+                                    "is_me": true,
+                                    "speaking": true
+                                }),
+                            );
+                        } else {
+                            emit_event(
+                                &window,
+                                EventName::VCSpeak,
+                                json!({
+                                    "user_id": payload["data"]["user_id"],
+                                    "is_me": false,
+                                    "speaking": true
+                                }),
+                            );
+                        }
+                    } else if payload["evt"] == "SPEAKING_STOP" {
+                        if payload["data"]["user_id"].to_string()
+                            == current_state.user_id.to_string()
+                        {
+                            emit_event(
+                                &window,
+                                EventName::VCSpeak,
+                                json!({
+                                    "user_id": payload["data"]["user_id"],
+                                    "is_me": true,
+                                    "speaking": false
+                                }),
+                            );
+                        } else {
+                            emit_event(
+                                &window,
+                                EventName::VCSpeak,
+                                json!({
+                                    "user_id": payload["data"]["user_id"],
+                                    "is_me": false,
+                                    "speaking": false
+                                }),
+                            );
+                        }
                     }
                 }
             }
@@ -352,13 +489,33 @@ async fn connect_ipc(window: Window) -> Result<(), IpcError> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet, connect_ipc])
+        .invoke_handler(tauri::generate_handler![connect_ipc])
+        .setup(|app| {
+            // create ipc client
+            let client_id = dotenv!("CLIENT_ID");
+            /*
+            let mut client = match DiscordIpcClient::new(client_id) {
+                Ok(c) => c,
+                Err(err) => {
+                    Err(IpcError {
+                        error_type: IpcErrorType::CreateClient,
+                        message: err.to_string(),
+                        payload: None,
+                    });
+                }
+            };
+            */
+            let client = IPCClientManager::new(
+                DiscordIpcClient::new(client_id).expect("Failed to create ipc client"),
+            );
+            app.manage(client);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 // TODO
-// need to implement voice state events
 // refactor event processing for readability
 // there is a rare case which fails receiving socket data every time :(
-// makes the error which is emit to have `IpcError` structure
+// make client to state so that it can be accessed through app

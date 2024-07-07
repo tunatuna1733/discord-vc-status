@@ -498,6 +498,21 @@ async fn connect_ipc(
 }
 
 #[tauri::command]
+async fn disconnect_ipc(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    if let Err(err) = client.lock().await.ipc_client.close() {
+        return Err(IpcError {
+            error_type: IpcErrorType::Connect,
+            message: format!("Failed to close ipc socket.\n{}", err.to_string()),
+            payload: None,
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn disconnect_vc(
     client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
 ) -> Result<(), IpcError> {
@@ -577,7 +592,8 @@ fn main() {
             connect_ipc,
             disconnect_vc,
             toggle_mute,
-            toggle_deafen
+            toggle_deafen,
+            disconnect_ipc
         ])
         .setup(|app| {
             // create ipc client

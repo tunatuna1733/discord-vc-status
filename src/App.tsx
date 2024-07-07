@@ -2,16 +2,13 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
 import { UnlistenFn, listen } from '@tauri-apps/api/event';
 import { IpcError, RustError } from './utils/error';
-import { Box, Grid, IconButton } from '@mui/material';
-import SettingsPhoneIcon from '@mui/icons-material/SettingsPhone';
-import MicIcon from '@mui/icons-material/Mic';
-import MicOffIcon from '@mui/icons-material/MicOff';
-import HeadsetIcon from '@mui/icons-material/Headset';
-import HeadsetOffIcon from '@mui/icons-material/HeadsetOff';
-import CallEndIcon from '@mui/icons-material/CallEnd';
 import { UserData } from './types/user';
 import { VCSelectPayload, VCMuteUpdatePayload, VCInfoPayload, VCUserPayload, VCSpeakPayload } from './types/event';
 import { formatUserData } from './utils/vc';
+import VCSettings from './components/VcSettings';
+import { Box, Grid } from '@mui/material';
+import UserList from './components/UserList';
+import SetActivity from './components/SetActivity';
 
 function App() {
   const [retryCount, setRetryCount] = useState(0);
@@ -76,11 +73,8 @@ function App() {
 
       const unlistenVcInfo = await listen<VCInfoPayload>('vc_info', (e) => {
         setVCName(e.payload.name);
-        const currentUserList: UserData[] = [];
-        e.payload.users.forEach((u) => {
-          const userData = formatUserData(u);
-          currentUserList.push(userData);
-        });
+        // TODO: dont do formatUserData here
+        const currentUserList = e.payload.users.map((u) => formatUserData(u));
         setUserList(currentUserList);
       });
       unlistenFuncs.push(unlistenVcInfo);
@@ -146,98 +140,29 @@ function App() {
       unlistenFuncs.forEach((f) => {
         f();
       });
+      invoke('disconnect_ipc');
     };
   }, []);
 
-  const disconnectVC = async () => {
-    invoke('disconnect_vc').catch((e: IpcError) => {
-      // failed to send disconnect payload
-      console.error(e);
-    });
-  };
-
-  const toggleMute = async () => {
-    invoke('toggle_mute').catch((e: IpcError) => {
-      console.error(e);
-    });
-  };
-
-  const toggleDeafen = async () => {
-    invoke('toggle_deafen').catch((e: IpcError) => {
-      console.error(e);
-    });
-  };
+  useEffect(() => {
+    console.log(userList);
+  }, [userList]);
 
   return (
     <Box height={`${window.innerHeight}px`}>
       <Box height={'10%'}>
+        <VCSettings inVC={inVC} isMute={isMute} isDeafen={isDeafen} isSpeaking={isSpeaking} vcName={vcName} />
+      </Box>
+      <Box>
         <Grid container>
-          <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton aria-label="chatting">
-              <SettingsPhoneIcon />
-            </IconButton>
+          <Grid item xs={7}>
+            <UserList userList={userList} />
           </Grid>
-          <Grid item xs={8}>
-            {vcName}
-          </Grid>
-          <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton
-              aria-label="mute"
-              onClick={(e) => {
-                e.preventDefault();
-                toggleMute();
-              }}
-            >
-              {inVC ? (
-                isMute ? (
-                  <MicOffIcon color="error" />
-                ) : isSpeaking ? (
-                  <MicIcon color="success" />
-                ) : (
-                  <MicIcon />
-                )
-              ) : isMute ? (
-                <MicOffIcon color="disabled" />
-              ) : (
-                <MicIcon color="disabled" />
-              )}
-            </IconButton>
-          </Grid>
-          <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton
-              aria-label="deafen"
-              onClick={(e) => {
-                e.preventDefault();
-                toggleDeafen();
-              }}
-            >
-              {inVC ? (
-                isDeafen ? (
-                  <HeadsetOffIcon color="error" />
-                ) : (
-                  <HeadsetIcon />
-                )
-              ) : isDeafen ? (
-                <HeadsetOffIcon color="disabled" />
-              ) : (
-                <HeadsetIcon color="disabled" />
-              )}
-            </IconButton>
-          </Grid>
-          <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton
-              aria-label="disconnect"
-              onClick={(e) => {
-                e.preventDefault();
-                disconnectVC();
-              }}
-            >
-              <CallEndIcon />
-            </IconButton>
+          <Grid item xs={5}>
+            <SetActivity />
           </Grid>
         </Grid>
       </Box>
-      <Box>{JSON.stringify(userList)}</Box>
     </Box>
   );
 }

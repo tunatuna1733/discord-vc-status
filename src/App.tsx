@@ -68,7 +68,8 @@ function App() {
       unlistenFuncs.push(unlistenVCSelect);
 
       const unlistenVCUpdate = await listen<VCMuteUpdatePayload>('vc_mute_update', (e) => {
-        setIsMute(e.payload.mute);
+        const mute = e.payload.deaf ? true : e.payload.mute;
+        setIsMute(mute);
         setIsDeafen(e.payload.deaf);
       });
       unlistenFuncs.push(unlistenVCUpdate);
@@ -148,6 +149,25 @@ function App() {
     };
   }, []);
 
+  const disconnectVC = async () => {
+    invoke('disconnect_vc').catch((e: IpcError) => {
+      // failed to send disconnect payload
+      console.error(e);
+    });
+  };
+
+  const toggleMute = async () => {
+    invoke('toggle_mute').catch((e: IpcError) => {
+      console.error(e);
+    });
+  };
+
+  const toggleDeafen = async () => {
+    invoke('toggle_deafen').catch((e: IpcError) => {
+      console.error(e);
+    });
+  };
+
   return (
     <Box height={`${window.innerHeight}px`}>
       <Box height={'10%'}>
@@ -161,7 +181,13 @@ function App() {
             {vcName}
           </Grid>
           <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton aria-label="mute">
+            <IconButton
+              aria-label="mute"
+              onClick={(e) => {
+                e.preventDefault();
+                toggleMute();
+              }}
+            >
               {inVC ? (
                 isMute ? (
                   <MicOffIcon color="error" />
@@ -178,7 +204,13 @@ function App() {
             </IconButton>
           </Grid>
           <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton aria-label="deafen">
+            <IconButton
+              aria-label="deafen"
+              onClick={(e) => {
+                e.preventDefault();
+                toggleDeafen();
+              }}
+            >
               {inVC ? (
                 isDeafen ? (
                   <HeadsetOffIcon color="error" />
@@ -193,7 +225,13 @@ function App() {
             </IconButton>
           </Grid>
           <Grid item xs={1} display={'flex'} alignItems={'center'} justifyContent={'center'}>
-            <IconButton aria-label="disconnect">
+            <IconButton
+              aria-label="disconnect"
+              onClick={(e) => {
+                e.preventDefault();
+                disconnectVC();
+              }}
+            >
               <CallEndIcon />
             </IconButton>
           </Grid>

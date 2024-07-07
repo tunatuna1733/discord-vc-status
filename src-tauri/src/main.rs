@@ -1,18 +1,23 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod auth;
-mod client;
 mod config;
+mod discord_api;
 mod ipc;
 mod log;
 
-use auth::{try_reauth, AuthError, AuthErrorType};
-use client::IPCClientManager;
+use discord_api::api_client::TokenData;
+use ipc::{
+    auth::{AuthError, AuthErrorType},
+    client::{IpcError, IpcErrorType, ReceiveIPCClient, SendIPCClient},
+};
+use std::sync::Arc;
+use tauri::async_runtime::Mutex;
+
 use config::Config;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use dotenvy_macro::{self, dotenv};
-use ipc::IpcError;
+
 use log::log_error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,9 +25,7 @@ use strum_macros::Display;
 use tauri::{Manager, State, Window};
 use uuid::Uuid;
 
-use crate::auth::{fetch_discord_token, send_auth, send_token};
 use crate::config::set_config;
-use crate::ipc::{set_vc_events, subscribe, IpcErrorType};
 
 #[derive(Display)]
 enum EventName {
@@ -67,11 +70,30 @@ struct TokenResponse {
 #[tauri::command]
 async fn connect_ipc(
     window: Window,
-    cm: State<'_, IPCClientManager>,
-    handle: tauri::AppHandle,
+    send_client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
 ) -> Result<(), IpcError> {
+    let client_id = dotenv!("CLIENT_ID");
+    let client = match DiscordIpcClient::new(client_id) {
+        Ok(c) => c,
+        Err(err) => {
+            return Err(IpcError {
+                error_type: IpcErrorType::CreateClient,
+                message: err.to_string(),
+                payload: None,
+            });
+        }
+    };
+    let mut receive_client = ReceiveIPCClient::new(client);
+
     // connect to ipc
-    if let Err(err) = cm.client.lock().await.connect() {
+    if let Err(err) = receive_client.ipc_client.connect() {
+        return Err(IpcError {
+            error_type: IpcErrorType::Connect,
+            message: err.to_string(),
+            payload: None,
+        });
+    }
+    if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
         return Err(IpcError {
             error_type: IpcErrorType::Connect,
             message: err.to_string(),
@@ -80,20 +102,31 @@ async fn connect_ipc(
     }
 
     // reauth --------------------------------
-    let refresh_token = match try_reauth(&cm.client).await {
+    let refreshed_data = match send_client_manager.lock().await.try_reauth().await {
         Ok(t) => t,
         Err(err) => {
             // if the reauth failed, it tries to do the normal auth
             emit_event(&window, EventName::Error, err);
-            if let Err(err) = send_auth(&cm.client).await {
+            if let Err(err) = send_client_manager.lock().await.send_auth().await {
                 emit_event(&window, EventName::Error, err);
             }
-            "".to_string()
+            TokenData {
+                access_token: "".to_string(),
+                refresh_token: "".to_string(),
+            }
         }
     };
 
+    if let Err(err) = receive_client.send_token(refreshed_data.access_token).await {
+        return Err(IpcError {
+            error_type: IpcErrorType::Authorize,
+            message: err.message,
+            payload: None,
+        });
+    }
+
     if let Err(err) = set_config(Config {
-        refresh_token: refresh_token.to_string(),
+        refresh_token: refreshed_data.refresh_token.to_string(),
     }) {
         emit_event(
             &window,
@@ -105,15 +138,15 @@ async fn connect_ipc(
         );
     }
 
+    let send_client = Arc::clone(&send_client_manager);
     // subscribe and emit events
     tauri::async_runtime::spawn(async move {
-        let client_manager = handle.state::<IPCClientManager>();
         let mut current_state = CurrentState {
             channel_id: Value::Null,
             user_id: Value::Null,
         };
         loop {
-            let (_opcode, payload) = match client_manager.client.lock().await.recv() {
+            let (_opcode, payload) = match receive_client.ipc_client.recv() {
                 Ok(res) => res,
                 Err(err) => {
                     println!("Event Receive Error\n{}", err);
@@ -129,7 +162,13 @@ async fn connect_ipc(
                     // start authentication
 
                     // fetch access token
-                    let tokens = match fetch_discord_token(code).await {
+                    let tokens = match send_client
+                        .lock()
+                        .await
+                        .api_client
+                        .fetch_discord_token(code)
+                        .await
+                    {
                         Ok(t) => t,
                         Err(err) => {
                             emit_event(&window, EventName::CriticalError, err);
@@ -150,15 +189,23 @@ async fn connect_ipc(
                         );
                     }
                     // send token to ipc
-                    if let Err(err) = send_token(&client_manager.client, tokens.access_token).await
+                    if let Err(err) = receive_client.send_token(tokens.access_token.clone()).await {
+                        emit_event(&window, EventName::CriticalError, err);
+                    }
+                    if let Err(err) = send_client
+                        .lock()
+                        .await
+                        .send_token(tokens.access_token)
+                        .await
                     {
                         emit_event(&window, EventName::CriticalError, err);
                     }
                 } else if payload["cmd"] == "AUTHENTICATE" {
                     current_state.user_id = payload["data"]["user"]["id"].clone();
                     // subscribe events after authentication was done
-                    if let Err(err) =
-                        subscribe(&client_manager.client, "VOICE_SETTINGS_UPDATE", json!({})).await
+                    if let Err(err) = receive_client
+                        .subscribe("VOICE_SETTINGS_UPDATE", json!({}), true)
+                        .await
                     {
                         emit_event(
                             &window,
@@ -170,8 +217,9 @@ async fn connect_ipc(
                             },
                         );
                     }
-                    if let Err(err) =
-                        subscribe(&client_manager.client, "VOICE_CHANNEL_SELECT", json!({})).await
+                    if let Err(err) = receive_client
+                        .subscribe("VOICE_CHANNEL_SELECT", json!({}), true)
+                        .await
                     {
                         emit_event(
                             &window,
@@ -188,22 +236,8 @@ async fn connect_ipc(
                         "nonce": Uuid::new_v4().to_string(),
                         "cmd": "GET_SELECTED_VOICE_CHANNEL"
                     });
-                    if let Err(_) = client_manager
-                        .client
-                        .lock()
-                        .await
-                        .send(current_state_payload, 1)
-                    {
-                        emit_event(
-                            &window,
-                            EventName::CriticalError,
-                            IpcError {
-                                error_type: IpcErrorType::EventSend,
-                                message: "Failed to send GET_SELECTED_VOICE_CHANNEL request."
-                                    .to_string(),
-                                payload: None,
-                            },
-                        );
+                    if let Err(err) = receive_client.send(current_state_payload).await {
+                        emit_event(&window, EventName::CriticalError, err);
                         continue;
                     }
                 } else if payload["cmd"] == "GET_SELECTED_VOICE_CHANNEL" {
@@ -236,9 +270,9 @@ async fn connect_ipc(
                             }),
                         );
 
-                        if let Err(err) =
-                            set_vc_events(&client_manager.client, current_state.channel_id, true)
-                                .await
+                        if let Err(err) = receive_client
+                            .set_vc_events(current_state.channel_id, true)
+                            .await
                         {
                             emit_event(
                                 &window,
@@ -306,12 +340,9 @@ async fn connect_ipc(
                             emit_event(&window, EventName::VCSelect, vc_select_payload);
                             if current_state.channel_id.is_null() {
                                 // unsubscribe events
-                                if let Err(err) = set_vc_events(
-                                    &client_manager.client,
-                                    current_state.channel_id,
-                                    false,
-                                )
-                                .await
+                                if let Err(err) = receive_client
+                                    .set_vc_events(current_state.channel_id, false)
+                                    .await
                                 {
                                     emit_event(
                                         &window,
@@ -333,44 +364,23 @@ async fn connect_ipc(
                             emit_event(&window, EventName::VCSelect, vc_select_payload);
 
                             // send current vc status command
-                            if let Err(_) = client_manager.client.lock().await.send(
-                                json!({
+                            if let Err(err) = receive_client
+                                .send(json!({
                                     "nonce": Uuid::new_v4().to_string(),
                                     "cmd": "GET_SELECTED_VOICE_CHANNEL"
-                                }),
-                                1,
-                            ) {
-                                emit_event(
-                                    &window,
-                                    EventName::Error,
-                                    IpcError {
-                                        error_type: IpcErrorType::EventSend,
-                                        message:
-                                            "Failed to send GET_SELECTED_VOICE_CHANNEL request."
-                                                .to_string(),
-                                        payload: None,
-                                    },
-                                );
+                                }))
+                                .await
+                            {
+                                emit_event(&window, EventName::Error, err);
                                 continue;
                             }
 
                             // subscribe events for current channel
-                            if let Err(err) = set_vc_events(
-                                &client_manager.client,
-                                current_state.channel_id,
-                                true,
-                            )
-                            .await
+                            if let Err(err) = receive_client
+                                .set_vc_events(current_state.channel_id, true)
+                                .await
                             {
-                                emit_event(
-                                    &window,
-                                    EventName::Error,
-                                    IpcError {
-                                        error_type: err.error_type,
-                                        message: err.message,
-                                        payload: err.payload,
-                                    },
-                                );
+                                emit_event(&window, EventName::Error, err);
                             }
                         }
                     } else if payload["evt"] == "VOICE_STATE_CREATE" {
@@ -487,27 +497,97 @@ async fn connect_ipc(
     Ok(())
 }
 
+#[tauri::command]
+async fn disconnect_vc(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    let payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "SELECT_VOICE_CHANNEL",
+        "args": {
+            "channel_id": Value::Null
+        }
+    });
+    if let Err(err) = client.lock().await.send(payload.clone()).await {
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_mute(client_manager: State<'_, Arc<Mutex<SendIPCClient>>>) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    let get_payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "GET_VOICE_SETTINGS"
+    });
+    let response = match client.lock().await.send(get_payload).await {
+        Ok(r) => r,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    let mute = response["data"]["mute"].as_bool().unwrap();
+    let set_payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "SET_VOICE_SETTINGS",
+        "args": {
+            "mute": !mute
+        }
+    });
+    if let Err(err) = client.lock().await.send(set_payload).await {
+        return Err(err);
+    };
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_deafen(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    let get_payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "GET_VOICE_SETTINGS"
+    });
+    let response = match client.lock().await.send(get_payload).await {
+        Ok(r) => r,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    let deaf = response["data"]["deaf"].as_bool().unwrap();
+    let set_payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "SET_VOICE_SETTINGS",
+        "args": {
+            "deaf": !deaf
+        }
+    });
+    if let Err(err) = client.lock().await.send(set_payload).await {
+        return Err(err);
+    };
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![connect_ipc])
+        .invoke_handler(tauri::generate_handler![
+            connect_ipc,
+            disconnect_vc,
+            toggle_mute,
+            toggle_deafen
+        ])
         .setup(|app| {
             // create ipc client
             let client_id = dotenv!("CLIENT_ID");
             /*
-            let mut client = match DiscordIpcClient::new(client_id) {
-                Ok(c) => c,
-                Err(err) => {
-                    Err(IpcError {
-                        error_type: IpcErrorType::CreateClient,
-                        message: err.to_string(),
-                        payload: None,
-                    });
-                }
-            };
+
             */
-            let client = IPCClientManager::new(
-                DiscordIpcClient::new(client_id).expect("Failed to create ipc client"),
-            );
+            let client = Arc::new(Mutex::from(SendIPCClient::new(
+                DiscordIpcClient::new(client_id).expect("Failed to create client"),
+            )));
             app.manage(client);
             Ok(())
         })
@@ -518,4 +598,3 @@ fn main() {
 // TODO
 // refactor event processing for readability
 // there is a rare case which fails receiving socket data every time :(
-// make client to state so that it can be accessed through app

@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
 import { UnlistenFn, listen } from '@tauri-apps/api/event';
 import { IpcError, RustError } from './utils/error';
 import { UserData } from './types/user';
 import { VCSelectPayload, VCMuteUpdatePayload, VCInfoPayload, VCUserPayload, VCSpeakPayload } from './types/event';
 import { formatUserData } from './utils/vc';
-import VCSettings from './components/VcSettings';
+import VCSettings from './components/VCSettings';
 import { Box, Grid } from '@mui/material';
 import UserList from './components/UserList';
 import SetActivity from './components/SetActivity';
@@ -19,11 +19,76 @@ function App() {
   const [userList, setUserList] = useState<UserData[]>([]);
   const [vcName, setVCName] = useState('');
 
+  const userListRef = useRef<UserData[]>();
+  userListRef.current = userList;
+
+  const joinUser = (userData: VCUserPayload) => {
+    if (userListRef.current) {
+      const mute = userData.data.mute || userData.data.self_mute || userData.data.deaf || userData.data.self_deaf;
+      const deaf = userData.data.deaf || userData.data.self_deaf;
+      const data: UserData = {
+        id: userData.data.id,
+        username: userData.data.username,
+        avatar: userData.data.avatar,
+        nick: userData.data.nick,
+        mute,
+        deaf,
+        speaking: false,
+      };
+      setUserList([...userListRef.current, data]);
+    }
+  };
+
+  const updateUser = (userData: VCUserPayload) => {
+    if (userListRef.current) {
+      const currentData = userListRef.current.find((u) => u.id === userData.data.id);
+      const mute = userData.data.mute || userData.data.self_mute || userData.data.deaf || userData.data.self_deaf;
+      const deaf = userData.data.deaf || userData.data.self_deaf;
+      const newData: UserData = {
+        id: userData.data.id,
+        username: userData.data.username,
+        avatar: userData.data.avatar,
+        nick: userData.data.nick,
+        mute,
+        deaf,
+        speaking: false,
+      };
+      if (!currentData) {
+        setUserList([...userListRef.current, newData]);
+      } else {
+        newData.speaking = currentData.speaking;
+        setUserList([...userListRef.current.filter((u) => u.id !== userData.data.id), newData]);
+      }
+    }
+  };
+
+  const leaveUser = (userData: VCUserPayload) => {
+    if (userListRef.current) {
+      setUserList(userListRef.current.filter((u) => u.id !== userData.data.id));
+    }
+  };
+
+  const getVCInfo = () => {
+    invoke<VCInfoPayload & VCSelectPayload>('get_vc_info')
+      .then((r) => {
+        console.log(r);
+        if (r.in_vc) {
+          setVCName(r.name);
+          const currentUserList = r.users.map(formatUserData);
+          console.log(currentUserList);
+          setUserList(currentUserList);
+        }
+      })
+      .catch((e: IpcError) => {
+        console.error(e);
+      });
+  };
+
   useEffect(() => {
     const unlistenFuncs: UnlistenFn[] = [];
     const initIPC = async () => {
       console.log('Started connecting to ipc...');
-      invoke('connect_ipc')
+      invoke('connect_ipc', { reauth: true })
         .then(() => {
           console.log('Connected to ipc.');
         })
@@ -33,6 +98,10 @@ function App() {
           } else if (e.error_type === 'Connect') {
             // discord client might be not running
             // schedule the `connect_ipc` command in 10 secs or smth
+          } else if (e.error_type === 'ReAuth') {
+            console.error('Failed to reauth. Trying to do normal auth...');
+            console.error(e.message);
+            invoke('connect_ipc', { reauth: false });
           } else if (e.error_type === 'Authorize') {
             if (retryCount < 5) {
               // retry in 5 secs
@@ -60,6 +129,8 @@ function App() {
           setVCName('');
           setUserList([]);
           setIsSpeaking(false);
+        } else {
+          getVCInfo();
         }
       });
       unlistenFuncs.push(unlistenVCSelect);
@@ -72,62 +143,56 @@ function App() {
       unlistenFuncs.push(unlistenVCUpdate);
 
       const unlistenVcInfo = await listen<VCInfoPayload>('vc_info', (e) => {
+        console.log(e.payload.users);
+        /*
         setVCName(e.payload.name);
-        // TODO: dont do formatUserData here
-        const currentUserList = e.payload.users.map((u) => formatUserData(u));
-        setUserList(currentUserList);
+        setUserList(
+          e.payload.users.map((u) => {
+            const mute = u.voice_state.mute || u.voice_state.self_mute || u.voice_state.deaf || u.voice_state.self_deaf;
+            const deaf = u.voice_state.deaf || u.voice_state.self_deaf;
+            const userData: UserData = {
+              id: u.user.id,
+              username: u.user.username,
+              avatar: u.user.avatar,
+              nick: u.nick,
+              mute,
+              deaf,
+              speaking: false,
+            };
+            return userData;
+          })
+        );
+        */
       });
       unlistenFuncs.push(unlistenVcInfo);
 
       const unlistenVcUser = await listen<VCUserPayload>('vc_user', (e) => {
         const rawData = e.payload;
+        console.log('vc_user event');
+        console.log(rawData);
         if (rawData.event === 'JOIN') {
-          const mute = rawData.data.mute || rawData.data.self_mute || rawData.data.deaf || rawData.data.self_deaf;
-          const deaf = rawData.data.deaf || rawData.data.self_deaf;
-          const data: UserData = {
-            id: rawData.data.id,
-            username: rawData.data.username,
-            avatar: rawData.data.avatar,
-            nick: rawData.data.nick,
-            mute,
-            deaf,
-            speaking: false,
-          };
-          setUserList([...userList, data]);
+          joinUser(rawData);
         } else if (rawData.event === 'UPDATE') {
-          const currentData = userList.find((u) => u.id === rawData.data.id);
-          const mute = rawData.data.mute || rawData.data.self_mute || rawData.data.deaf || rawData.data.self_deaf;
-          const deaf = rawData.data.deaf || rawData.data.self_deaf;
-          const newData: UserData = {
-            id: rawData.data.id,
-            username: rawData.data.username,
-            avatar: rawData.data.avatar,
-            nick: rawData.data.nick,
-            mute,
-            deaf,
-            speaking: false,
-          };
-          if (!currentData) {
-            setUserList([...userList, newData]);
-          } else {
-            newData.speaking = currentData.speaking;
-            setUserList([...userList.filter((u) => u.id !== rawData.data.id), newData]);
-          }
+          updateUser(rawData);
         } else if (rawData.event === 'LEAVE') {
-          setUserList(userList.filter((u) => u.id !== rawData.data.id));
+          leaveUser(rawData);
         }
       });
       unlistenFuncs.push(unlistenVcUser);
 
       const unlistenVcSpeak = await listen<VCSpeakPayload>('vc_speak', (e) => {
+        console.log('vc_speak event');
+        console.log(e.payload);
         if (e.payload.is_me) {
           setIsSpeaking(e.payload.speaking);
         } else {
-          const userData = userList.find((u) => u.id === e.payload.user_id);
-          if (userData) {
-            const newData = structuredClone(userData);
-            newData.speaking = e.payload.speaking;
-            setUserList([...userList.filter((u) => u.id !== e.payload.user_id), newData]);
+          if (userListRef.current) {
+            const userData = userListRef.current.find((u) => u.id === e.payload.user_id);
+            if (userData) {
+              const newData = structuredClone(userData);
+              newData.speaking = e.payload.speaking;
+              setUserList([...userListRef.current.filter((u) => u.id !== e.payload.user_id), newData]);
+            }
           }
         }
       });
@@ -137,6 +202,7 @@ function App() {
     initIPC();
 
     return () => {
+      console.log('useEffect returned');
       unlistenFuncs.forEach((f) => {
         f();
       });

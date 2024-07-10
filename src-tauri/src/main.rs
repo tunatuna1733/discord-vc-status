@@ -6,7 +6,6 @@ mod discord_api;
 mod ipc;
 mod log;
 
-use discord_api::api_client::TokenData;
 use ipc::{
     auth::{AuthError, AuthErrorType},
     client::{IpcError, IpcErrorType, ReceiveIPCClient, SendIPCClient},
@@ -71,6 +70,7 @@ struct TokenResponse {
 async fn connect_ipc(
     window: Window,
     send_client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+    reauth: bool,
 ) -> Result<(), IpcError> {
     let client_id = dotenv!("CLIENT_ID");
     let client = match DiscordIpcClient::new(client_id) {
@@ -85,57 +85,108 @@ async fn connect_ipc(
     };
     let mut receive_client = ReceiveIPCClient::new(client);
 
-    // connect to ipc
-    if let Err(err) = receive_client.ipc_client.connect() {
-        return Err(IpcError {
-            error_type: IpcErrorType::Connect,
-            message: err.to_string(),
-            payload: None,
-        });
-    }
-    if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
-        return Err(IpcError {
-            error_type: IpcErrorType::Connect,
-            message: err.to_string(),
-            payload: None,
-        });
-    }
-
     // reauth --------------------------------
-    let refreshed_data = match send_client_manager.lock().await.try_reauth().await {
-        Ok(t) => t,
-        Err(err) => {
-            // if the reauth failed, it tries to do the normal auth
-            emit_event(&window, EventName::Error, err);
-            if let Err(err) = send_client_manager.lock().await.send_auth().await {
-                emit_event(&window, EventName::Error, err);
+    if reauth {
+        let refreshed_data = match send_client_manager.lock().await.try_reauth().await {
+            Ok(t) => t,
+            Err(err) => {
+                // if the reauth failed, it tries to do the normal auth
+                return Err(IpcError {
+                    error_type: IpcErrorType::ReAuth,
+                    message: format!("Failed to reauth.\n{}", err.message),
+                    payload: None,
+                });
             }
-            TokenData {
-                access_token: "".to_string(),
-                refresh_token: "".to_string(),
-            }
-        }
-    };
+        };
 
-    if let Err(err) = receive_client.send_token(refreshed_data.access_token).await {
-        return Err(IpcError {
-            error_type: IpcErrorType::Authorize,
-            message: err.message,
-            payload: None,
-        });
-    }
-
-    if let Err(err) = set_config(Config {
-        refresh_token: refreshed_data.refresh_token.to_string(),
-    }) {
-        emit_event(
-            &window,
-            EventName::Error,
-            AuthError {
-                error_type: AuthErrorType::ConfigSave,
+        // connect to ipc
+        if let Err(err) = receive_client.ipc_client.connect() {
+            return Err(IpcError {
+                error_type: IpcErrorType::Connect,
                 message: err.to_string(),
-            },
-        );
+                payload: None,
+            });
+        }
+        if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
+            return Err(IpcError {
+                error_type: IpcErrorType::Connect,
+                message: err.to_string(),
+                payload: None,
+            });
+        }
+
+        if let Err(err) = receive_client
+            .send_token(refreshed_data.access_token.clone())
+            .await
+        {
+            let _ = receive_client.ipc_client.close();
+            return Err(IpcError {
+                error_type: IpcErrorType::Authorize,
+                message: err.message,
+                payload: None,
+            });
+        }
+
+        if let Err(err) = send_client_manager
+            .lock()
+            .await
+            .send_token(refreshed_data.access_token)
+            .await
+        {
+            let _ = receive_client.ipc_client.close();
+            return Err(IpcError {
+                error_type: IpcErrorType::Authorize,
+                message: err.message,
+                payload: None,
+            });
+        }
+
+        if let Err(err) = set_config(Config {
+            refresh_token: refreshed_data.refresh_token.to_string(),
+        }) {
+            emit_event(
+                &window,
+                EventName::Error,
+                AuthError {
+                    error_type: AuthErrorType::ConfigSave,
+                    message: err.to_string(),
+                },
+            );
+        }
+    } else {
+        // connect to ipc
+        if let Err(err) = receive_client.ipc_client.connect() {
+            return Err(IpcError {
+                error_type: IpcErrorType::Connect,
+                message: err.to_string(),
+                payload: None,
+            });
+        }
+        if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
+            return Err(IpcError {
+                error_type: IpcErrorType::Connect,
+                message: err.to_string(),
+                payload: None,
+            });
+        }
+
+        if let Err(err) = receive_client.ipc_client.send(
+            json!({
+                "nonce": Uuid::new_v4().to_string(),
+                "cmd": "AUTHORIZE",
+                "args": {
+                    "client_id": client_id,
+                    "scopes": ["rpc", "identify"]
+                }
+            }),
+            1,
+        ) {
+            return Err(IpcError {
+                error_type: IpcErrorType::Authorize,
+                message: err.to_string(),
+                payload: None,
+            });
+        }
     }
 
     let send_client = Arc::clone(&send_client_manager);
@@ -437,6 +488,9 @@ async fn connect_ipc(
                                 EventName::VCUser,
                                 json!({
                                     "event": "LEAVE",
+                                    "data": {
+                                        "id": payload["data"]["user"]["id"]
+                                    }
                                 }),
                             );
                         }
@@ -586,6 +640,36 @@ async fn toggle_deafen(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_vc_info(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+) -> Result<Value, IpcError> {
+    let client = Arc::clone(&client_manager);
+    let payload = json!({
+        "nonce": Uuid::new_v4().to_string(),
+        "cmd": "GET_SELECTED_VOICE_CHANNEL"
+    });
+    let response = match client.lock().await.send(payload).await {
+        Ok(r) => r,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    if response["data"].is_null() {
+        // not currently in vc
+        Ok(json!({
+            "in_vc": false
+        }))
+    } else {
+        // in vc
+        Ok(json!({
+            "in_vc": true,
+            "name": response["data"]["name"],
+            "users": response["data"]["voice_states"]
+        }))
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -593,7 +677,8 @@ fn main() {
             disconnect_vc,
             toggle_mute,
             toggle_deafen,
-            disconnect_ipc
+            disconnect_ipc,
+            get_vc_info
         ])
         .setup(|app| {
             // create ipc client

@@ -10,6 +10,7 @@ pub enum IpcErrorType {
     CreateClient,
     Connect,
     Authorize,
+    ReAuth,
     Subscribe,
     Unsubscribe,
     EventReceive,

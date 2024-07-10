@@ -76,10 +76,6 @@ impl SendIPCClient {
             }
         };
 
-        if let Err(err) = self.send_token(tokens.access_token.clone()).await {
-            return Err(err);
-        }
-
         Ok(tokens)
     }
 

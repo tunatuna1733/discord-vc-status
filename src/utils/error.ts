@@ -2,6 +2,7 @@ export type IpcErrorType =
   | 'CreateClient'
   | 'Connect'
   | 'Authorize'
+  | 'ReAuth'
   | 'Subscribe'
   | 'EventReceive'
   | 'EventSend'

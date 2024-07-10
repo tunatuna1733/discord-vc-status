@@ -1,6 +1,6 @@
 export type VoiceState = {
   nick: string;
-  voice_states: {
+  voice_state: {
     mute: boolean;
     deaf: boolean;
     self_mute: boolean;

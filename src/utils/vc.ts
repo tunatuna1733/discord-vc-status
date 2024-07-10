@@ -9,8 +9,8 @@ export const isUserSpeaking = (userId: string, userList: UserData[]) => {
 
 export const formatUserData = (data: VoiceState): UserData => {
   const mute =
-    data.voice_states.mute || data.voice_states.self_mute || data.voice_states.deaf || data.voice_states.self_deaf;
-  const deaf = data.voice_states.deaf || data.voice_states.self_deaf;
+    data.voice_state.mute || data.voice_state.self_mute || data.voice_state.deaf || data.voice_state.self_deaf;
+  const deaf = data.voice_state.deaf || data.voice_state.self_deaf;
   const userData: UserData = {
     id: data.user.id,
     username: data.user.username,

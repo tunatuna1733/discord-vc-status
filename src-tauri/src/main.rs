@@ -200,7 +200,7 @@ async fn connect_ipc(
             let (_opcode, payload) = match receive_client.ipc_client.recv() {
                 Ok(res) => res,
                 Err(err) => {
-                    println!("Event Receive Error\n{}", err);
+                    emit_event(&window, EventName::CriticalError, err.to_string());
                     continue;
                 }
             };
@@ -336,8 +336,6 @@ async fn connect_ipc(
                             );
                         }
                     }
-                } else {
-                    println!("IPC Event: {}", payload);
                 }
             } else {
                 if payload["evt"] == "ERROR" {
@@ -426,6 +424,7 @@ async fn connect_ipc(
                                 continue;
                             }
 
+                            /*
                             // subscribe events for current channel
                             if let Err(err) = receive_client
                                 .set_vc_events(current_state.channel_id, true)
@@ -433,6 +432,7 @@ async fn connect_ipc(
                             {
                                 emit_event(&window, EventName::Error, err);
                             }
+                             */
                         }
                     } else if payload["evt"] == "VOICE_STATE_CREATE" {
                         // someone joined vc

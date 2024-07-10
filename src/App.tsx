@@ -222,7 +222,7 @@ function App() {
       <Box>
         <Grid container>
           <Grid item xs={7}>
-            <UserList userList={userList} />
+            {inVC && <UserList userList={userList} />}
           </Grid>
           <Grid item xs={5}>
             <SetActivity />

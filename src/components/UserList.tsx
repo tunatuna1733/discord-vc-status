@@ -11,15 +11,25 @@ const UserItem = ({ userData }: { userData: UserData }) => {
     <ListItem>
       <ListItemButton>
         <ListItemAvatar>
-          <Avatar alt={userData.id} src={`https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`} />
+          <Avatar
+            alt={userData.id}
+            src={`https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`}
+            style={userData.speaking ? { outline: '2px solid green' } : {}}
+          />
         </ListItemAvatar>
-        <ListItemText>{userData.nick}</ListItemText>
-        <Grid container textAlign={'right'}>
-          <Grid item xs={6}>
-            {userData.mute ? <MicOffIcon /> : <MicIcon />}
+        <Grid container>
+          <Grid item xs={9}>
+            <ListItemText>{userData.nick}</ListItemText>
           </Grid>
-          <Grid item xs={6}>
-            {userData.deaf ? <HeadsetOffIcon /> : <HeadsetIcon />}
+          <Grid item xs={3} display={'flex'} alignItems={'center'} justifyContent={'center'}>
+            <Grid container>
+              <Grid item xs={6} display={'flex'} alignItems={'center'} justifyContent={'center'}>
+                {userData.mute ? <MicOffIcon /> : <MicIcon />}
+              </Grid>
+              <Grid item xs={6} display={'flex'} alignItems={'center'} justifyContent={'center'}>
+                {userData.deaf ? <HeadsetOffIcon /> : <HeadsetIcon />}
+              </Grid>
+            </Grid>
           </Grid>
         </Grid>
       </ListItemButton>

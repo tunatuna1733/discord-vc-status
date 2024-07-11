@@ -13,7 +13,7 @@ use ipc::{
 use std::sync::Arc;
 use tauri::async_runtime::Mutex;
 
-use config::Config;
+use config::save_refresh_token;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use dotenvy_macro::{self, dotenv};
 
@@ -23,8 +23,6 @@ use serde_json::{json, Value};
 use strum_macros::Display;
 use tauri::{Manager, State, Window};
 use uuid::Uuid;
-
-use crate::config::set_config;
 
 #[derive(Display)]
 enum EventName {
@@ -141,9 +139,7 @@ async fn connect_ipc(
             });
         }
 
-        if let Err(err) = set_config(Config {
-            refresh_token: refreshed_data.refresh_token.to_string(),
-        }) {
+        if let Err(err) = save_refresh_token(refreshed_data.refresh_token.to_string()) {
             emit_event(
                 &window,
                 EventName::Error,
@@ -170,20 +166,10 @@ async fn connect_ipc(
             });
         }
 
-        if let Err(err) = receive_client.ipc_client.send(
-            json!({
-                "nonce": Uuid::new_v4().to_string(),
-                "cmd": "AUTHORIZE",
-                "args": {
-                    "client_id": client_id,
-                    "scopes": ["rpc", "identify"]
-                }
-            }),
-            1,
-        ) {
+        if let Err(err) = receive_client.send_auth().await {
             return Err(IpcError {
                 error_type: IpcErrorType::Authorize,
-                message: err.to_string(),
+                message: err.message,
                 payload: None,
             });
         }
@@ -227,9 +213,7 @@ async fn connect_ipc(
                         }
                     };
                     // save refresh token
-                    if let Err(err) = set_config(Config {
-                        refresh_token: tokens.refresh_token,
-                    }) {
+                    if let Err(err) = save_refresh_token(tokens.refresh_token) {
                         emit_event(
                             &window,
                             EventName::Error,
@@ -672,6 +656,7 @@ async fn get_vc_info(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             connect_ipc,
             disconnect_vc,

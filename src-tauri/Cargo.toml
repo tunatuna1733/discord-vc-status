@@ -22,6 +22,8 @@ dotenvy = "0.15.7"
 dotenvy_macro = "0.15.7"
 strum = "0.26.3"
 strum_macros = "0.26.4"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+tauri-plugin-window-state = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!

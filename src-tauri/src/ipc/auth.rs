@@ -2,7 +2,7 @@ use dotenvy_macro::dotenv;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::get_config, discord_api::api_client::TokenData, log::log_error};
+use crate::{config::get_refresh_token, discord_api::api_client::TokenData, log::log_error};
 
 use super::client::{ReceiveIPCClient, SendIPCClient};
 
@@ -23,27 +23,8 @@ pub struct AuthError {
 }
 
 impl SendIPCClient {
-    pub async fn send_auth(&mut self) -> Result<(), AuthError> {
-        let client_id = dotenv!("CLIENT_ID");
-        let payload = serde_json::json!({
-            "nonce": Uuid::new_v4().to_string(),
-            "cmd": "AUTHORIZE",
-            "args": {
-                "client_id": client_id,
-                "scopes": ["rpc", "identify"]
-            }
-        });
-        if let Err(err) = self.send(payload).await {
-            return Err(AuthError {
-                error_type: AuthErrorType::IpcSend,
-                message: format!("Failed to send authorization request.\n{}", err.message),
-            });
-        }
-        Ok(())
-    }
-
     pub async fn try_reauth(&mut self) -> Result<TokenData, AuthError> {
-        let config = match get_config() {
+        let refresh_token: String = match get_refresh_token() {
             Ok(c) => c,
             Err(err) => {
                 // TODO: replace here with send_auth func
@@ -58,11 +39,7 @@ impl SendIPCClient {
             }
         };
 
-        let tokens = match self
-            .api_client
-            .refresh_discord_token(config.refresh_token)
-            .await
-        {
+        let tokens = match self.api_client.refresh_discord_token(refresh_token).await {
             Ok(t) => t,
             Err(err) => {
                 log_error(
@@ -98,6 +75,25 @@ impl SendIPCClient {
 }
 
 impl ReceiveIPCClient {
+    pub async fn send_auth(&mut self) -> Result<(), AuthError> {
+        let client_id = dotenv!("CLIENT_ID");
+        let payload = serde_json::json!({
+            "nonce": Uuid::new_v4().to_string(),
+            "cmd": "AUTHORIZE",
+            "args": {
+                "client_id": client_id,
+                "scopes": ["rpc", "identify"]
+            }
+        });
+        if let Err(err) = self.send(payload).await {
+            return Err(AuthError {
+                error_type: AuthErrorType::IpcSend,
+                message: format!("Failed to send authorization request.\n{}", err.message),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn send_token(&mut self, access_token: String) -> Result<(), AuthError> {
         let auth_payload = serde_json::json!({
             "nonce": Uuid::new_v4().to_string(),

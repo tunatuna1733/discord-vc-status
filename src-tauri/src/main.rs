@@ -10,7 +10,7 @@ use ipc::{
     auth::{AuthError, AuthErrorType},
     client::{IpcError, IpcErrorType, ReceiveIPCClient, SendIPCClient},
 };
-use std::sync::Arc;
+use std::{process, sync::Arc};
 use tauri::async_runtime::Mutex;
 
 use config::save_refresh_token;
@@ -99,6 +99,7 @@ async fn connect_ipc(
 
         // connect to ipc
         if let Err(err) = receive_client.ipc_client.connect() {
+            let _ = receive_client.ipc_client.close();
             return Err(IpcError {
                 error_type: IpcErrorType::Connect,
                 message: err.to_string(),
@@ -106,6 +107,7 @@ async fn connect_ipc(
             });
         }
         if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
+            let _ = receive_client.ipc_client.close();
             return Err(IpcError {
                 error_type: IpcErrorType::Connect,
                 message: err.to_string(),
@@ -152,6 +154,7 @@ async fn connect_ipc(
     } else {
         // connect to ipc
         if let Err(err) = receive_client.ipc_client.connect() {
+            let _ = receive_client.ipc_client.close();
             return Err(IpcError {
                 error_type: IpcErrorType::Connect,
                 message: err.to_string(),
@@ -159,6 +162,7 @@ async fn connect_ipc(
             });
         }
         if let Err(err) = send_client_manager.lock().await.ipc_client.connect() {
+            let _ = receive_client.ipc_client.close();
             return Err(IpcError {
                 error_type: IpcErrorType::Connect,
                 message: err.to_string(),
@@ -654,6 +658,66 @@ async fn get_vc_info(
     }
 }
 
+#[tauri::command]
+async fn set_activity(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+    activity: Value,
+) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    let nonce = Uuid::new_v4().to_string();
+    let payload = json!({
+        "nonce": nonce.clone(),
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": process::id(),
+            "activity": activity
+        }
+    });
+    let response = match client.lock().await.send(payload.clone()).await {
+        Ok(r) => r,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    if response["evt"] == "ERROR" && response["nonce"] == nonce {
+        return Err(IpcError {
+            error_type: IpcErrorType::EventSend,
+            message: format!("Failed to set activity.\n{}", payload["data"]["message"]),
+            payload: Some(payload),
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_activity(
+    client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
+) -> Result<(), IpcError> {
+    let client = Arc::clone(&client_manager);
+    let nonce = Uuid::new_v4().to_string();
+    let payload = json!({
+        "nonce": nonce.clone(),
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": process::id(),
+        }
+    });
+    let response = match client.lock().await.send(payload.clone()).await {
+        Ok(r) => r,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    if response["evt"] == "ERROR" && response["nonce"] == nonce {
+        return Err(IpcError {
+            error_type: IpcErrorType::EventSend,
+            message: format!("Failed to clear activity.\n{}", payload["data"]["message"]),
+            payload: Some(payload),
+        });
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -663,7 +727,9 @@ fn main() {
             toggle_mute,
             toggle_deafen,
             disconnect_ipc,
-            get_vc_info
+            get_vc_info,
+            set_activity,
+            clear_activity
         ])
         .setup(|app| {
             // create ipc client

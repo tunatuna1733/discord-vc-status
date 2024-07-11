@@ -9,6 +9,8 @@ import VCSettings from './components/VCSettings';
 import { Box, Grid } from '@mui/material';
 import UserList from './components/UserList';
 import SetActivity from './components/SetActivity';
+import { message } from '@tauri-apps/api/dialog';
+import { exit } from '@tauri-apps/api/process';
 
 function App() {
   const [retryCount, setRetryCount] = useState(0);
@@ -87,6 +89,7 @@ function App() {
   useEffect(() => {
     const unlistenFuncs: UnlistenFn[] = [];
     const initIPC = async () => {
+      let failed = false;
       console.log('Started connecting to ipc...');
       invoke('connect_ipc', { reauth: true })
         .then(() => {
@@ -95,9 +98,17 @@ function App() {
         .catch((e: IpcError) => {
           if (e.error_type === 'CreateClient') {
             // kill the process cuz its un-recoverable
+            failed = true;
+            message(e.message, 'Fatal Error').then(() => {
+              exit(1);
+            });
           } else if (e.error_type === 'Connect') {
             // discord client might be not running
             // schedule the `connect_ipc` command in 10 secs or smth
+            failed = true;
+            setTimeout(() => {
+              initIPC();
+            }, 10 * 1000);
           } else if (e.error_type === 'ReAuth') {
             console.error('Failed to reauth. Trying to do normal auth...');
             console.error(e.message);
@@ -105,16 +116,29 @@ function App() {
           } else if (e.error_type === 'Authorize') {
             if (retryCount < 5) {
               // retry in 5 secs
-              // setTimeout...
+              failed = true;
+              setTimeout(() => {
+                initIPC();
+              }, 5 * 1000);
               setRetryCount((prev) => prev + 1);
+            } else {
+              failed = true;
+              message('Exceeded retry limit.\nTry again later!', 'Fatal Error').then(() => {
+                exit(1);
+              });
             }
           } else if (e.error_type === 'Subscribe') {
           }
         });
 
-      const unlistenCriticalError = await listen<RustError>('critical_error', (e) => {
+      if (failed) return;
+
+      const unlistenCriticalError = await listen<RustError>('critical_error', async (e) => {
         console.error(`Critical Error: ${e.payload.error_type}\n  ${e.payload.message}`);
         // Show dialog and kill the process
+        message(`${e.payload.error_type}\n${e.payload.message}`, 'Fatal Error').then(() => {
+          exit(1);
+        });
       });
       unlistenFuncs.push(unlistenCriticalError);
 
@@ -142,27 +166,8 @@ function App() {
       });
       unlistenFuncs.push(unlistenVCUpdate);
 
-      const unlistenVcInfo = await listen<VCInfoPayload>('vc_info', (e) => {
-        console.log(e.payload.users);
-        /*
-        setVCName(e.payload.name);
-        setUserList(
-          e.payload.users.map((u) => {
-            const mute = u.voice_state.mute || u.voice_state.self_mute || u.voice_state.deaf || u.voice_state.self_deaf;
-            const deaf = u.voice_state.deaf || u.voice_state.self_deaf;
-            const userData: UserData = {
-              id: u.user.id,
-              username: u.user.username,
-              avatar: u.user.avatar,
-              nick: u.nick,
-              mute,
-              deaf,
-              speaking: false,
-            };
-            return userData;
-          })
-        );
-        */
+      const unlistenVcInfo = await listen<VCInfoPayload>('vc_info', (_e) => {
+        // console.log(e.payload.users);
       });
       unlistenFuncs.push(unlistenVcInfo);
 

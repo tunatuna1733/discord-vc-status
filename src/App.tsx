@@ -20,9 +20,12 @@ function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [userList, setUserList] = useState<UserData[]>([]);
   const [vcName, setVCName] = useState('');
+  const [userId, setUserId] = useState('');
 
   const userListRef = useRef<UserData[]>();
   userListRef.current = userList;
+  const userIdRef = useRef<string>();
+  userIdRef.current = userId;
 
   const joinUser = (userData: VCUserPayload) => {
     if (userListRef.current) {
@@ -37,7 +40,13 @@ function App() {
         deaf,
         speaking: false,
       };
-      setUserList([...userListRef.current, data]);
+      setUserList(
+        [...userListRef.current, data].sort((a, b) => {
+          if (parseInt(a.id) < parseInt(b.id)) return -1;
+          else if (parseInt(a.id) > parseInt(b.id)) return 1;
+          else return 0;
+        })
+      );
     }
   };
 
@@ -56,17 +65,37 @@ function App() {
         speaking: false,
       };
       if (!currentData) {
-        setUserList([...userListRef.current, newData]);
+        setUserList(
+          [...userListRef.current, newData].sort((a, b) => {
+            if (parseInt(a.id) < parseInt(b.id)) return -1;
+            else if (parseInt(a.id) > parseInt(b.id)) return 1;
+            else return 0;
+          })
+        );
       } else {
         newData.speaking = currentData.speaking;
-        setUserList([...userListRef.current.filter((u) => u.id !== userData.data.id), newData]);
+        setUserList(
+          [...userListRef.current.filter((u) => u.id !== userData.data.id), newData].sort((a, b) => {
+            if (parseInt(a.id) < parseInt(b.id)) return -1;
+            else if (parseInt(a.id) > parseInt(b.id)) return 1;
+            else return 0;
+          })
+        );
       }
     }
   };
 
   const leaveUser = (userData: VCUserPayload) => {
     if (userListRef.current) {
-      setUserList(userListRef.current.filter((u) => u.id !== userData.data.id));
+      setUserList(
+        userListRef.current
+          .filter((u) => u.id !== userData.data.id)
+          .sort((a, b) => {
+            if (parseInt(a.id) < parseInt(b.id)) return -1;
+            else if (parseInt(a.id) > parseInt(b.id)) return 1;
+            else return 0;
+          })
+      );
     }
   };
 
@@ -74,9 +103,9 @@ function App() {
     invoke<VCInfoPayload & VCSelectPayload>('get_vc_info')
       .then((r) => {
         console.log(r);
-        if (r.in_vc) {
+        if (r.in_vc && userIdRef.current) {
           setVCName(r.name);
-          const currentUserList = r.users.map(formatUserData);
+          const currentUserList = r.users.map(formatUserData).filter((u) => u.id !== userIdRef.current);
           console.log(currentUserList);
           setUserList(currentUserList);
         }
@@ -196,12 +225,23 @@ function App() {
             if (userData) {
               const newData = structuredClone(userData);
               newData.speaking = e.payload.speaking;
-              setUserList([...userListRef.current.filter((u) => u.id !== e.payload.user_id), newData]);
+              setUserList(
+                [...userListRef.current.filter((u) => u.id !== e.payload.user_id), newData].sort((a, b) => {
+                  if (parseInt(a.id) < parseInt(b.id)) return -1;
+                  else if (parseInt(a.id) > parseInt(b.id)) return 1;
+                  else return 0;
+                })
+              );
             }
           }
         }
       });
       unlistenFuncs.push(unlistenVcSpeak);
+
+      const unlistenUserId = await listen<string>('user_id', (e) => {
+        setUserId(e.payload);
+      });
+      unlistenFuncs.push(unlistenUserId);
     };
 
     initIPC();

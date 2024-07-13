@@ -1,9 +1,9 @@
 export type Activity = {
-  name: string;
+  // name: string;
   type: number;
   url?: string;
-  created_at: number;
-  timestamps: TimeStamps;
+  // created_at: number;
+  timestamps?: TimeStamps;
   application_id?: string; // snowflake
   details?: string;
   state?: string;

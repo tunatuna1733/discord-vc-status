@@ -54,6 +54,7 @@ impl SendIPCClient {
 
     pub async fn send(&mut self, payload: Value) -> Result<Value, IpcError> {
         let nonce = payload["nonce"].clone();
+        println!("Sent payload: {}", payload.clone());
         if let Err(err) = self.ipc_client.send(payload.clone(), 1) {
             // error while sending data to discord ipc
             return Err(IpcError {

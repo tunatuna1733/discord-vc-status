@@ -40,6 +40,8 @@ enum EventName {
     VCUser,
     #[strum(to_string = "vc_speak")]
     VCSpeak,
+    #[strum(to_string = "user_id")]
+    UserID,
 }
 
 fn emit_event<S: Serialize + Clone>(window: &Window, event_name: EventName, payload: S) -> () {
@@ -191,7 +193,7 @@ async fn connect_ipc(
                 Ok(res) => res,
                 Err(err) => {
                     emit_event(&window, EventName::CriticalError, err.to_string());
-                    continue;
+                    break;
                 }
             };
             println!("{}", payload);
@@ -213,7 +215,7 @@ async fn connect_ipc(
                         Ok(t) => t,
                         Err(err) => {
                             emit_event(&window, EventName::CriticalError, err);
-                            continue;
+                            break;
                         }
                     };
                     // save refresh token
@@ -230,6 +232,7 @@ async fn connect_ipc(
                     // send token to ipc
                     if let Err(err) = receive_client.send_token(tokens.access_token.clone()).await {
                         emit_event(&window, EventName::CriticalError, err);
+                        break;
                     }
                     if let Err(err) = send_client
                         .lock()
@@ -238,9 +241,15 @@ async fn connect_ipc(
                         .await
                     {
                         emit_event(&window, EventName::CriticalError, err);
+                        break;
                     }
                 } else if payload["cmd"] == "AUTHENTICATE" {
                     current_state.user_id = payload["data"]["user"]["id"].clone();
+                    emit_event(
+                        &window,
+                        EventName::UserID,
+                        payload["data"]["user"]["id"].clone(),
+                    );
                     // subscribe events after authentication was done
                     if let Err(err) = receive_client
                         .subscribe("VOICE_SETTINGS_UPDATE", json!({}), true)
@@ -255,6 +264,7 @@ async fn connect_ipc(
                                 payload: err.payload,
                             },
                         );
+                        break;
                     }
                     if let Err(err) = receive_client
                         .subscribe("VOICE_CHANNEL_SELECT", json!({}), true)
@@ -269,6 +279,7 @@ async fn connect_ipc(
                                 payload: err.payload,
                             },
                         );
+                        break;
                     }
                     // get the current voice channel
                     let current_state_payload = json!({
@@ -277,7 +288,7 @@ async fn connect_ipc(
                     });
                     if let Err(err) = receive_client.send(current_state_payload).await {
                         emit_event(&window, EventName::CriticalError, err);
-                        continue;
+                        break;
                     }
                 } else if payload["cmd"] == "GET_SELECTED_VOICE_CHANNEL" {
                     if payload["data"].is_null() {
@@ -339,7 +350,7 @@ async fn connect_ipc(
                                 payload: None,
                             },
                         );
-                        continue;
+                        break;
                     }
                     if payload["cmd"] == "SUBSCRIBE" {
                         // client failed to subscribe events
@@ -661,9 +672,11 @@ async fn get_vc_info(
 #[tauri::command]
 async fn set_activity(
     client_manager: State<'_, Arc<Mutex<SendIPCClient>>>,
-    activity: Value,
+    mut activity: Value,
 ) -> Result<(), IpcError> {
     let client = Arc::clone(&client_manager);
+    let client_id = dotenv!("CLIENT_ID");
+    // activity["application_id"] = client_id.into();
     let nonce = Uuid::new_v4().to_string();
     let payload = json!({
         "nonce": nonce.clone(),
@@ -679,10 +692,11 @@ async fn set_activity(
             return Err(err);
         }
     };
+    println!("{}", response);
     if response["evt"] == "ERROR" && response["nonce"] == nonce {
         return Err(IpcError {
             error_type: IpcErrorType::EventSend,
-            message: format!("Failed to set activity.\n{}", payload["data"]["message"]),
+            message: format!("Failed to set activity.\n{}", response["data"]["message"]),
             payload: Some(payload),
         });
     }
